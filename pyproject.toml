@@ -27,3 +27,8 @@ where = ["src"]
 Homepage = "https://github.com/digitaldesignerjazz/nexus-hyperspace"
 Repository = "https://github.com/digitaldesignerjazz/nexus-hyperspace"
 Issues = "https://github.com/digitaldesignerjazz/nexus-hyperspace/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra -q --strict-markers"
