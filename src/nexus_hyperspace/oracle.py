@@ -13,7 +13,20 @@ import random
 from collections import defaultdict
 from statistics import mean, stdev
 
-from .models import LinkMetrics, LinkScore
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich import box
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+
+try:
+    from .models import LinkMetrics, LinkScore
+except ImportError:
+    # Fallback for direct script execution during early dev
+    from models import LinkMetrics, LinkScore  # type: ignore
 
 
 class HyperspaceLinkQualityOracle:
@@ -31,6 +44,7 @@ class HyperspaceLinkQualityOracle:
         self.ewma_alpha = ewma_alpha
         self._history: dict[str, list[LinkMetrics]] = defaultdict(list)
         self._scores: dict[str, LinkScore] = {}
+        self.console = Console() if RICH_AVAILABLE else None
 
     def record_metrics(
         self,
@@ -54,7 +68,6 @@ class HyperspaceLinkQualityOracle:
         if not history:
             return self._default_score(peer_id)
 
-        # Use last N observations for EWMA-like smoothing
         n = min(len(history), 8)
         recent = history[-n:]
 
@@ -64,14 +77,6 @@ class HyperspaceLinkQualityOracle:
         avg_latency = mean(latencies)
         avg_loss = mean(losses)
 
-        # Simple EWMA on the latest value (prototype)
-        if len(history) > 1:
-            prev = self._scores.get(peer_id)
-            if prev:
-                avg_latency = self.ewma_alpha * avg_latency + (1 - self.ewma_alpha) * (100 - prev.latency_score) * 2  # rough inverse
-                # For demo we keep simple moving average
-
-        # Scoring formulas (0-100, higher is better)
         latency_score = max(0.0, min(100.0, 120 - (avg_latency * 0.8)))
         loss_penalty = avg_loss * 8
         stability_score = max(0.0, min(100.0, 95 - loss_penalty - (stdev(latencies) if len(latencies) > 1 else 0) * 0.5))
@@ -80,7 +85,6 @@ class HyperspaceLinkQualityOracle:
         latency_score = round(latency_score, 1)
         stability_score = round(stability_score, 1)
 
-        # Basic classification (will be moved to separate engine in M1.2)
         if avg_latency < 25 and avg_loss < 0.5:
             classification = "Local-Multicast"
         elif avg_latency < 80 and avg_loss < 2.0:
@@ -121,13 +125,23 @@ class HyperspaceLinkQualityOracle:
     def demo_run(self, num_peers: int = 5) -> None:
         """Run a self-contained demonstration with simulated hyperspace + local peers.
 
-        This makes `python -m nexus_hyperspace.oracle` produce visible, useful output.
+        Uses Rich for beautiful output when available (pip install -e ".[dev]").
         """
-        print("\n🌌 Nexus Hyperspace — Link Quality Oracle Demo (Prototype v0.1)")
-        print("=" * 70)
-        print("Simulating observations on several peers (local + hyperspace)...\n")
+        title = "Nexus Hyperspace — Link Quality Oracle Demo (Prototype v0.1)"
 
-        # Representative peers (mix of local and long-distance)
+        if RICH_AVAILABLE and self.console:
+            self.console.print(Panel.fit(
+                f"[bold cyan]{title}[/bold cyan]\n"
+                "[dim]Core concepts from ARCHITECTURE.md • M1.1 foundation[/dim]",
+                border_style="bright_blue",
+                box=box.ROUNDED,
+            ))
+            self.console.print("[dim]Simulating observations on several peers (local + hyperspace)...[/dim]\n")
+        else:
+            print(f"\n{title}")
+            print("=" * 70)
+            print("Simulating observations on several peers (local + hyperspace)...\n")
+
         demo_peers = [
             "local-cluster-hannover-01",
             "hyperspace-eu-berlin-03",
@@ -136,10 +150,9 @@ class HyperspaceLinkQualityOracle:
             "hyperspace-latam-sao-paulo",
         ][:num_peers]
 
-        random.seed(42)  # reproducible demo
+        random.seed(42)
 
         for peer in demo_peers:
-            # Simulate 4–7 observations with realistic variance
             for _ in range(random.randint(4, 7)):
                 if "local" in peer:
                     lat = random.uniform(4, 22)
@@ -151,14 +164,52 @@ class HyperspaceLinkQualityOracle:
 
             score = self.get_score(peer)
             if score:
-                print(
-                    f"{peer:30} | Health: {score.overall_health:5.1f}% | "
-                    f"Latency: {score.latency_score:5.1f} | Stability: {score.stability_score:5.1f} | "
-                    f"Conf: {score.confidence:.2f} | {score.classification}"
-                )
+                if RICH_AVAILABLE and self.console:
+                    # Will be rendered in table below
+                    pass
+                else:
+                    print(
+                        f"{peer:30} | Health: {score.overall_health:5.1f}% | "
+                        f"Latency: {score.latency_score:5.1f} | Stability: {score.stability_score:5.1f} | "
+                        f"Conf: {score.confidence:.2f} | {score.classification}"
+                    )
 
-        print("\n✅ Oracle prototype operational. Scores ready for router / agent consumption.")
-        print("Next: Integrate real Yggdrasil admin socket + persistent storage.\n")
+        if RICH_AVAILABLE and self.console:
+            table = Table(
+                title="[bold]Link Quality Scores[/bold]",
+                show_header=True,
+                header_style="bold magenta",
+                box=box.ROUNDED,
+            )
+            table.add_column("Peer", style="cyan", no_wrap=True)
+            table.add_column("Health %", justify="right", style="green")
+            table.add_column("Latency", justify="right")
+            table.add_column("Stability", justify="right")
+            table.add_column("Confidence", justify="right")
+            table.add_column("Classification", style="yellow")
+
+            for peer in demo_peers:
+                score = self.get_score(peer)
+                if score:
+                    health_style = "green" if score.overall_health > 75 else "yellow" if score.overall_health > 55 else "red"
+                    table.add_row(
+                        peer,
+                        f"[{health_style}]{score.overall_health:.1f}[/{health_style}]",
+                        f"{score.latency_score:.1f}",
+                        f"{score.stability_score:.1f}",
+                        f"{score.confidence:.2f}",
+                        score.classification,
+                    )
+
+            self.console.print(table)
+            self.console.print(
+                "[green]✓[/green] Oracle prototype operational. "
+                "Scores ready for router / agent consumption.\n"
+                "[dim]Next: Real Yggdrasil admin socket + persistent storage (SQLite).[/dim]"
+            )
+        else:
+            print("\n✓ Oracle prototype operational. Scores ready for router / agent consumption.")
+            print("Next: Integrate real Yggdrasil admin socket + persistent storage.\n")
 
 
 if __name__ == "__main__":
