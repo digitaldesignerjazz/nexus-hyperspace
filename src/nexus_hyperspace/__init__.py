@@ -8,12 +8,11 @@ Part of the broader NovaNet / xMesh / QNET vision.
 
 __version__ = "0.1.0"
 
-# Core exports for easy importing
 try:
     from .oracle import HyperspaceLinkQualityOracle
     from .models import LinkMetrics, LinkScore, PeerClassification
+    from .yggdrasil_client import YggdrasilAdminClient
 except ImportError:
-    # Allow package import even if submodules have issues during early development
     pass
 
 __all__ = [
@@ -21,5 +20,6 @@ __all__ = [
     "LinkMetrics",
     "LinkScore",
     "PeerClassification",
+    "YggdrasilAdminClient",
     "__version__",
 ]
