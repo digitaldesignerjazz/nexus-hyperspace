@@ -1,0 +1,6 @@
+# Core dependencies (currently none for the prototype)
+# Add as the project grows (e.g. rich, pydantic, sqlalchemy, grpcio, etc.)
+
+# Development / optional
+# rich>=13.0
+# pytest>=8.0
