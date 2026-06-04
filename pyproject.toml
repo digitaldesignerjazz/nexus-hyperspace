@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-hyperspace"
+version = "0.1.0"
+description = "Advanced hyperspace peering, long-distance Yggdrasil mesh coordination, Nexus AI agent swarm integration, and decentralized infrastructure protocols."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Sven Norman Esslinger", email = "digitaldesignerjazz@users.noreply.github.com" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["rich>=13.0", "pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+
+[project.urls]
+Homepage = "https://github.com/digitaldesignerjazz/nexus-hyperspace"
+Repository = "https://github.com/digitaldesignerjazz/nexus-hyperspace"
+Issues = "https://github.com/digitaldesignerjazz/nexus-hyperspace/issues"
