@@ -14,6 +14,7 @@ try:
     from .yggdrasil_client import YggdrasilAdminClient
     from .storage import OracleStorage
     from .peer_classifier import PeerClassifier, classify_peer, ClassificationResult
+    from .router import HyperspaceRouter, Constellation
 except ImportError:
     pass
 
@@ -27,5 +28,7 @@ __all__ = [
     "PeerClassifier",
     "classify_peer",
     "ClassificationResult",
+    "HyperspaceRouter",
+    "Constellation",
     "__version__",
 ]
