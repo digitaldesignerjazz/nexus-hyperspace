@@ -25,24 +25,26 @@ except ImportError:
 try:
     from .models import LinkMetrics, LinkScore
     from .yggdrasil_client import YggdrasilAdminClient
+    from .storage import OracleStorage
 except ImportError:
-    from models import LinkMetrics, LinkScore  # type: ignore
-    from yggdrasil_client import YggdrasilAdminClient  # type: ignore
+    from models import LinkMetrics, LinkScore
+    from yggdrasil_client import YggdrasilAdminClient
+    from storage import OracleStorage
 
 
 class HyperspaceLinkQualityOracle:
     """Core component for recording metrics and computing link health scores.
 
-    Supports both simulated data (for development) and live data from a running
-    Yggdrasil node via the admin socket (when available).
+    Now with optional persistence via SQLite and live Yggdrasil data.
     """
 
-    def __init__(self, ewma_alpha: float = 0.3):
+    def __init__(self, ewma_alpha: float = 0.3, persist: bool = True):
         self.ewma_alpha = ewma_alpha
         self._history: dict[str, list[LinkMetrics]] = defaultdict(list)
         self._scores: dict[str, LinkScore] = {}
         self.console = Console() if RICH_AVAILABLE else None
         self.ygg = YggdrasilAdminClient()
+        self.storage = OracleStorage() if persist else None
 
     def record_metrics(
         self,
@@ -58,6 +60,10 @@ class HyperspaceLinkQualityOracle:
             jitter_ms=jitter_ms,
         )
         self._history[peer_id].append(metrics)
+
+        if self.storage:
+            self.storage.record_metric(peer_id, latency_ms, packet_loss_percent, jitter_ms)
+
         return self._recalculate_score(peer_id)
 
     def _recalculate_score(self, peer_id: str) -> LinkScore:
@@ -100,6 +106,13 @@ class HyperspaceLinkQualityOracle:
             classification=classification,
         )
         self._scores[peer_id] = score
+
+        if self.storage:
+            self.storage.save_score(
+                peer_id, overall_health, latency_score, stability_score,
+                score.confidence, classification
+            )
+
         return score
 
     def _default_score(self, peer_id: str) -> LinkScore:
@@ -119,11 +132,6 @@ class HyperspaceLinkQualityOracle:
         return self._scores.copy()
 
     def poll_from_yggdrasil(self) -> int:
-        """Pull current peers from a running Yggdrasil node and record metrics.
-
-        Returns the number of peers successfully recorded.
-        This is the bridge from simulation to real-world operation (M1.1/M1.4).
-        """
         if not self.ygg.is_available():
             return 0
 
@@ -131,10 +139,7 @@ class HyperspaceLinkQualityOracle:
             peers = self.ygg.get_peers()
             recorded = 0
             for peer in peers:
-                # Yggdrasil peer dict usually contains 'latency', 'bytesSent', 'bytesReceived', etc.
-                # For prototype we derive simple loss estimate from activity
-                latency = float(peer.get("latency", 0)) / 1_000_000  # ns → ms
-                # Very rough loss proxy (in real version we would track over time)
+                latency = float(peer.get("latency", 0)) / 1_000_000
                 loss = 0.1 if peer.get("bytesReceived", 0) == 0 else 0.5
 
                 if latency > 0:
@@ -151,37 +156,31 @@ class HyperspaceLinkQualityOracle:
             return 0
 
     def demo_run(self, num_peers: int = 5, prefer_live: bool = True) -> None:
-        """Run demonstration.
-
-        If a Yggdrasil admin socket is available and prefer_live=True,
-        it will use real peer data. Otherwise falls back to simulation.
-        """
         title = "Nexus Hyperspace — Link Quality Oracle Demo (Prototype v0.1)"
 
         live_count = 0
         if prefer_live:
             live_count = self.poll_from_yggdrasil()
 
-        mode = "LIVE (from Yggdrasil)" if live_count > 0 else "SIMULATED"
+        mode = "LIVE (from Yggdrasil)" if live_count > 0 else "SIMULATED + PERSISTENT"
 
         if RICH_AVAILABLE and self.console:
             self.console.print(Panel.fit(
                 f"[bold cyan]{title}[/bold cyan]\n"
-                f"[dim]Mode: {mode} • M1.1 foundation[/dim]",
+                f"[dim]Mode: {mode} • Persistence: {'ON' if self.storage else 'OFF'}[/dim]",
                 border_style="bright_blue",
                 box=box.ROUNDED,
             ))
             if live_count > 0:
                 self.console.print(f"[green]✓[/green] Using live data from {live_count} real peers\n")
             else:
-                self.console.print("[dim]Simulating observations on several peers (local + hyperspace)...[/dim]\n")
+                self.console.print("[dim]Simulating observations + persisting to SQLite...[/dim]\n")
         else:
             print(f"\n{title}")
             print(f"Mode: {mode}")
             print("=" * 70)
 
         if live_count == 0:
-            # Fallback simulation (same peers as before)
             demo_peers = [
                 "local-cluster-hannover-01",
                 "hyperspace-eu-berlin-03",
@@ -201,7 +200,6 @@ class HyperspaceLinkQualityOracle:
                         loss = random.uniform(0.1, 4.5)
                     self.record_metrics(peer, latency_ms=lat, packet_loss_percent=loss)
 
-        # Render results
         peers_to_show = list(self._scores.keys()) if live_count > 0 else [
             "local-cluster-hannover-01",
             "hyperspace-eu-berlin-03",
@@ -234,15 +232,15 @@ class HyperspaceLinkQualityOracle:
             self.console.print(table)
             self.console.print(
                 "[green]✓[/green] Oracle prototype operational. "
-                "Scores ready for router / agent consumption.\n"
-                "[dim]Next: Persistent storage (SQLite) + full M1.2 classification engine.[/dim]"
+                "Data persisted to data/oracle.db\n"
+                "[dim]Next: Dedicated peer classification engine (M1.2) + better live metrics.[/dim]"
             )
         else:
             for peer in peers_to_show:
                 score = self.get_score(peer)
                 if score:
                     print(f"{peer:30} | Health: {score.overall_health:5.1f}% | Latency: {score.latency_score:5.1f} | Stability: {score.stability_score:5.1f} | {score.classification}")
-            print("\n✓ Oracle prototype operational.")
+            print("\n✓ Oracle prototype operational. Data saved to data/oracle.db")
 
 
 if __name__ == "__main__":
