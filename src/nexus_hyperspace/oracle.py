@@ -200,7 +200,6 @@ class HyperspaceLinkQualityOracle:
             return 0
 
     def show_history(self, peer_id: str, limit: int = 10):
-        """Print recent metrics and latest score for a specific peer."""
         if not self.storage:
             print("Persistence is disabled.")
             return
@@ -232,6 +231,46 @@ class HyperspaceLinkQualityOracle:
                 print(f"  {time.strftime('%H:%M:%S', time.localtime(m[3]))} | Latency: {m[0]:.1f}ms | Loss: {m[1]:.2f}% | Jitter: {m[2]:.1f}ms")
             if score:
                 print(f"Latest: {score.overall_health:.1f}% health | {score.classification}")
+
+    def show_status(self):
+        """Print a high-level status overview of the Oracle."""
+        all_scores = self.get_all_scores()
+        total = len(all_scores)
+
+        if total == 0:
+            msg = "No peers observed yet. Run the demo or poll live data first."
+            if RICH_AVAILABLE and self.console:
+                self.console.print(Panel.fit(msg, border_style="yellow"))
+            else:
+                print(msg)
+            return
+
+        avg_health = mean(s.overall_health for s in all_scores.values())
+        live_peers = sum(1 for p in all_scores if not p.startswith("local-cluster"))
+
+        if RICH_AVAILABLE and self.console:
+            self.console.print(Panel.fit(
+                f"[bold cyan]Nexus Hyperspace Oracle Status[/bold cyan]\n"
+                f"Peers observed: [bold]{total}[/bold]   |   Avg Health: [bold]{avg_health:.1f}%[/bold]\n"
+                f"Live hyperspace peers: [bold]{live_peers}[/bold]",
+                border_style="bright_blue",
+            ))
+
+            # Simple top 5 by health
+            sorted_peers = sorted(all_scores.items(), key=lambda x: x[1].overall_health, reverse=True)[:5]
+            table = Table(title="Top Peers by Health", show_header=True, header_style="bold green")
+            table.add_column("Peer")
+            table.add_column("Health %", justify="right")
+            table.add_column("Classification")
+
+            for pid, score in sorted_peers:
+                table.add_row(pid, f"{score.overall_health:.1f}", score.classification)
+            self.console.print(table)
+        else:
+            print(f"\nOracle Status")
+            print(f"  Peers observed : {total}")
+            print(f"  Average health : {avg_health:.1f}%")
+            print(f"  Hyperspace peers: {live_peers}")
 
     def demo_run(self, num_peers: int = 5, prefer_live: bool = True) -> None:
         title = "Nexus Hyperspace — Link Quality Oracle Demo (Prototype v0.1)"
@@ -311,7 +350,7 @@ class HyperspaceLinkQualityOracle:
             self.console.print(
                 "[green]✓[/green] Oracle prototype operational (M1.1 + M1.2). "
                 "Data persisted to data/oracle.db\n"
-                "[dim]Use --history <peer> to query stored data.[/dim]"
+                "[dim]Use --status or --history <peer> to explore data.[/dim]"
             )
         else:
             for peer in peers_to_show:
@@ -324,6 +363,7 @@ class HyperspaceLinkQualityOracle:
 def main():
     parser = argparse.ArgumentParser(description="Nexus Hyperspace Link Quality Oracle")
     parser.add_argument("--history", metavar="PEER_ID", help="Show recent history for a specific peer")
+    parser.add_argument("--status", action="store_true", help="Show high-level status overview")
     parser.add_argument("--no-live", action="store_true", help="Force simulation mode even if Yggdrasil is available")
     parser.add_argument("--peers", type=int, default=5, help="Number of simulated peers (when not live)")
 
@@ -333,6 +373,8 @@ def main():
 
     if args.history:
         oracle.show_history(args.history)
+    elif args.status:
+        oracle.show_status()
     else:
         oracle.demo_run(num_peers=args.peers, prefer_live=not args.no_live)
 
