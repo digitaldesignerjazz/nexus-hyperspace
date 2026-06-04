@@ -56,25 +56,28 @@ Current focus: Implementing M1.1 (Hyperspace Link Quality Oracle) and turning ro
 
 ## 🚀 Getting Started (Prototype Stage)
 
-> **Note:** This project is in active early development. Core components are being prototyped.
-
 ```bash
-# Clone the repository
+# 1. Clone
 git clone https://github.com/digitaldesignerjazz/nexus-hyperspace.git
 cd nexus-hyperspace
 
-# Future: Install dependencies (Python 3.11+, Rust optional for extensions)
-# pip install -r requirements.txt
+# 2. Install in editable/development mode (one-time)
+pip install -e .
 
-# Example: Run early oracle prototype (once implemented)
-# python -m nexus_hyperspace.oracle
+# 3. Run the Oracle prototype (now works directly)
+python -m nexus_hyperspace.oracle
+```
+
+**Recommended for best experience** (beautiful colored tables):
+```bash
+pip install -e ".[dev]"
+python -m nexus_hyperspace.oracle
 ```
 
 **Current Dependencies (Planned):**
-- Yggdrasil admin socket access
-- Python asyncio / gRPC or HTTP for agent communication
-- SQLite or lightweight time-series for metrics
-- Integration hooks with existing Nexus swarm agents
+- Yggdrasil admin socket access (for real metrics)
+- Python ≥ 3.11
+- Optional: `rich` for enhanced terminal output (included in `[dev]`)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for component details.
 
