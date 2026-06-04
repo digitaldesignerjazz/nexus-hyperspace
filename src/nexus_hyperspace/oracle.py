@@ -8,6 +8,7 @@ This is an early prototype implementing core concepts from ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import argparse
 import time
 import random
 from collections import defaultdict
@@ -38,7 +39,7 @@ class HyperspaceLinkQualityOracle:
     """Core component for recording metrics and computing link health scores.
 
     Supports live Yggdrasil data with improved delta-based loss/jitter calculation,
-    SQLite persistence, and integration with the new PeerClassifier (M1.2).
+    SQLite persistence, and integration with the PeerClassifier (M1.2).
     """
 
     def __init__(self, ewma_alpha: float = 0.3, persist: bool = True):
@@ -48,7 +49,6 @@ class HyperspaceLinkQualityOracle:
         self.console = Console() if RICH_AVAILABLE else None
         self.ygg = YggdrasilAdminClient()
         self.storage = OracleStorage() if persist else None
-        # For improved live metrics: keep last seen bytes per peer
         self._last_bytes: dict[str, dict] = defaultdict(dict)
 
     def record_metrics(
@@ -71,14 +71,12 @@ class HyperspaceLinkQualityOracle:
 
         score = self._recalculate_score(peer_id)
 
-        # Update classification using new M1.2 module
-        result = classify_peer(
+        classify_peer(
             peer_id=peer_id,
             current_score=score,
             recent_latencies=[m.latency_ms for m in self._history[peer_id][-8:]],
             recent_losses=[m.packet_loss_percent for m in self._history[peer_id][-8:]],
         )
-        # We could store the richer ClassificationResult if needed
         return score
 
     def _recalculate_score(self, peer_id: str) -> LinkScore:
@@ -147,7 +145,6 @@ class HyperspaceLinkQualityOracle:
         return self._scores.copy()
 
     def poll_from_yggdrasil(self) -> int:
-        """Improved live polling with delta-based loss and jitter estimation."""
         if not self.ygg.is_available():
             return 0
 
@@ -164,9 +161,8 @@ class HyperspaceLinkQualityOracle:
 
                 latency_ms = latency_ns / 1_000_000 if latency_ns > 0 else 50.0
 
-                # Delta-based loss/jitter estimation
                 prev = self._last_bytes.get(key, {})
-                loss = 0.5  # default moderate
+                loss = 0.5
                 jitter = 0.0
 
                 if prev:
@@ -174,18 +170,15 @@ class HyperspaceLinkQualityOracle:
                     sent_delta = max(0, curr_bytes_sent - prev.get("sent", 0))
                     recv_delta = max(0, curr_bytes_recv - prev.get("recv", 0))
 
-                    # Very rough loss proxy: if we sent a lot but received little
                     if sent_delta > 1000:
                         ratio = recv_delta / max(sent_delta, 1)
                         loss = max(0.0, min(15.0, (1.0 - ratio) * 12))
 
-                    # Jitter proxy from latency variance (we'll improve with history)
                     if key in self._history and len(self._history[key]) >= 2:
                         recent_lat = [m.latency_ms for m in self._history[key][-5:]]
                         if len(recent_lat) >= 2:
                             jitter = stdev(recent_lat)
 
-                # Store current state for next poll
                 self._last_bytes[key] = {
                     "sent": curr_bytes_sent,
                     "recv": curr_bytes_recv,
@@ -205,6 +198,40 @@ class HyperspaceLinkQualityOracle:
             if self.console:
                 self.console.print(f"[yellow]Warning:[/yellow] Could not poll Yggdrasil: {e}")
             return 0
+
+    def show_history(self, peer_id: str, limit: int = 10):
+        """Print recent metrics and latest score for a specific peer."""
+        if not self.storage:
+            print("Persistence is disabled.")
+            return
+
+        metrics = self.storage.get_recent_metrics(peer_id, limit)
+        score = self.get_score(peer_id)
+
+        if RICH_AVAILABLE and self.console:
+            self.console.print(Panel.fit(f"[bold]History for {peer_id}[/bold]", border_style="cyan"))
+            if metrics:
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("Time")
+                table.add_column("Latency (ms)", justify="right")
+                table.add_column("Loss %", justify="right")
+                table.add_column("Jitter (ms)", justify="right")
+
+                for m in reversed(metrics):
+                    ts = time.strftime("%H:%M:%S", time.localtime(m[3]))
+                    table.add_row(ts, f"{m[0]:.1f}", f"{m[1]:.2f}", f"{m[2]:.1f}")
+                self.console.print(table)
+            else:
+                self.console.print("[dim]No historical data found for this peer.[/dim]")
+
+            if score:
+                self.console.print(f"\nLatest score: [bold]{score.overall_health:.1f}%[/bold] health | {score.classification}")
+        else:
+            print(f"\nHistory for {peer_id}:")
+            for m in reversed(metrics):
+                print(f"  {time.strftime('%H:%M:%S', time.localtime(m[3]))} | Latency: {m[0]:.1f}ms | Loss: {m[1]:.2f}% | Jitter: {m[2]:.1f}ms")
+            if score:
+                print(f"Latest: {score.overall_health:.1f}% health | {score.classification}")
 
     def demo_run(self, num_peers: int = 5, prefer_live: bool = True) -> None:
         title = "Nexus Hyperspace — Link Quality Oracle Demo (Prototype v0.1)"
@@ -284,7 +311,7 @@ class HyperspaceLinkQualityOracle:
             self.console.print(
                 "[green]✓[/green] Oracle prototype operational (M1.1 + M1.2). "
                 "Data persisted to data/oracle.db\n"
-                "[dim]Improved live metrics + dedicated classifier active.[/dim]"
+                "[dim]Use --history <peer> to query stored data.[/dim]"
             )
         else:
             for peer in peers_to_show:
@@ -294,6 +321,21 @@ class HyperspaceLinkQualityOracle:
             print("\n✓ Oracle prototype operational. Data saved to data/oracle.db")
 
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description="Nexus Hyperspace Link Quality Oracle")
+    parser.add_argument("--history", metavar="PEER_ID", help="Show recent history for a specific peer")
+    parser.add_argument("--no-live", action="store_true", help="Force simulation mode even if Yggdrasil is available")
+    parser.add_argument("--peers", type=int, default=5, help="Number of simulated peers (when not live)")
+
+    args = parser.parse_args()
+
     oracle = HyperspaceLinkQualityOracle()
-    oracle.demo_run()
+
+    if args.history:
+        oracle.show_history(args.history)
+    else:
+        oracle.demo_run(num_peers=args.peers, prefer_live=not args.no_live)
+
+
+if __name__ == "__main__":
+    main()
