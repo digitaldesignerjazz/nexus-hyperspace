@@ -13,6 +13,7 @@ try:
     from .models import LinkMetrics, LinkScore, PeerClassification
     from .yggdrasil_client import YggdrasilAdminClient
     from .storage import OracleStorage
+    from .peer_classifier import PeerClassifier, classify_peer, ClassificationResult
 except ImportError:
     pass
 
@@ -23,5 +24,8 @@ __all__ = [
     "PeerClassification",
     "YggdrasilAdminClient",
     "OracleStorage",
+    "PeerClassifier",
+    "classify_peer",
+    "ClassificationResult",
     "__version__",
 ]
