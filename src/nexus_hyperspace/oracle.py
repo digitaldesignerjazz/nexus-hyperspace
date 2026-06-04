@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import time
 import random
-from collections import defaultdict
+from collections import defaultdict, deque
 from statistics import mean, stdev
 
 try:
@@ -38,18 +38,19 @@ except ImportError:
 class HyperspaceLinkQualityOracle:
     """Core component for recording metrics and computing link health scores.
 
-    Supports live Yggdrasil data with improved delta-based loss/jitter calculation,
-    SQLite persistence, and integration with the PeerClassifier (M1.2).
+    Now with improved live metrics using longer rolling windows for
+    jitter and loss estimation.
     """
 
-    def __init__(self, ewma_alpha: float = 0.3, persist: bool = True):
+    def __init__(self, ewma_alpha: float = 0.3, persist: bool = True, history_window: int = 8):
         self.ewma_alpha = ewma_alpha
-        self._history: dict[str, list[LinkMetrics]] = defaultdict(list)
+        self.history_window = history_window
+        self._history: dict[str, deque[LinkMetrics]] = defaultdict(lambda: deque(maxlen=history_window))
         self._scores: dict[str, LinkScore] = {}
         self.console = Console() if RICH_AVAILABLE else None
         self.ygg = YggdrasilAdminClient()
         self.storage = OracleStorage() if persist else None
-        self._last_bytes: dict[str, dict] = defaultdict(dict)
+        self._peer_snapshots: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=6))
 
     def record_metrics(
         self,
@@ -74,28 +75,26 @@ class HyperspaceLinkQualityOracle:
         classify_peer(
             peer_id=peer_id,
             current_score=score,
-            recent_latencies=[m.latency_ms for m in self._history[peer_id][-8:]],
-            recent_losses=[m.packet_loss_percent for m in self._history[peer_id][-8:]],
+            recent_latencies=[m.latency_ms for m in self._history[peer_id]],
+            recent_losses=[m.packet_loss_percent for m in self._history[peer_id]],
         )
         return score
 
     def _recalculate_score(self, peer_id: str) -> LinkScore:
-        history = self._history[peer_id]
+        history = list(self._history[peer_id])
         if not history:
             return self._default_score(peer_id)
 
-        n = min(len(history), 8)
-        recent = history[-n:]
-
-        latencies = [m.latency_ms for m in recent]
-        losses = [m.packet_loss_percent for m in recent]
+        latencies = [m.latency_ms for m in history]
+        losses = [m.packet_loss_percent for m in history]
 
         avg_latency = mean(latencies)
         avg_loss = mean(losses)
 
         latency_score = max(0.0, min(100.0, 120 - (avg_latency * 0.8)))
         loss_penalty = avg_loss * 8
-        stability_score = max(0.0, min(100.0, 95 - loss_penalty - (stdev(latencies) if len(latencies) > 1 else 0) * 0.5))
+        jitter_penalty = (stdev(latencies) if len(latencies) >= 2 else 0) * 0.4
+        stability_score = max(0.0, min(100.0, 95 - loss_penalty - jitter_penalty))
 
         overall_health = round((latency_score * 0.55 + stability_score * 0.45), 1)
         latency_score = round(latency_score, 1)
@@ -115,7 +114,7 @@ class HyperspaceLinkQualityOracle:
             overall_health=overall_health,
             latency_score=latency_score,
             stability_score=stability_score,
-            confidence=min(0.95, 0.4 + (len(history) * 0.08)),
+            confidence=min(0.95, 0.35 + (len(history) * 0.09)),
             classification=classification,
         )
         self._scores[peer_id] = score
@@ -145,6 +144,7 @@ class HyperspaceLinkQualityOracle:
         return self._scores.copy()
 
     def poll_from_yggdrasil(self) -> int:
+        """Improved live polling with longer rolling window for jitter and loss."""
         if not self.ygg.is_available():
             return 0
 
@@ -155,39 +155,43 @@ class HyperspaceLinkQualityOracle:
 
             for peer in peers:
                 key = peer.get("key", "unknown")
-                curr_bytes_sent = peer.get("bytesSent", 0)
-                curr_bytes_recv = peer.get("bytesReceived", 0)
-                latency_ns = peer.get("latency", 0)
+                curr = {
+                    "ts": now,
+                    "sent": peer.get("bytesSent", 0),
+                    "recv": peer.get("bytesReceived", 0),
+                    "latency_ns": peer.get("latency", 0),
+                }
 
-                latency_ms = latency_ns / 1_000_000 if latency_ns > 0 else 50.0
+                self._peer_snapshots[key].append(curr)
+                snapshots = list(self._peer_snapshots[key])
 
-                prev = self._last_bytes.get(key, {})
-                loss = 0.5
+                # Calculate latency
+                latency_ms = curr["latency_ns"] / 1_000_000 if curr["latency_ns"] > 0 else 60.0
+
+                # Improved loss & jitter using rolling window
+                loss = 1.5
                 jitter = 0.0
 
-                if prev:
-                    time_delta = max(1, now - prev.get("ts", now - 30))
-                    sent_delta = max(0, curr_bytes_sent - prev.get("sent", 0))
-                    recv_delta = max(0, curr_bytes_recv - prev.get("recv", 0))
+                if len(snapshots) >= 2:
+                    # Loss: average of recent send/receive ratios
+                    ratios = []
+                    for i in range(1, len(snapshots)):
+                        sent_d = max(0, snapshots[i]["sent"] - snapshots[i-1]["sent"])
+                        recv_d = max(0, snapshots[i]["recv"] - snapshots[i-1]["recv"])
+                        if sent_d > 500:
+                            ratios.append(recv_d / sent_d)
+                    if ratios:
+                        avg_ratio = mean(ratios)
+                        loss = max(0.0, min(12.0, (1.0 - avg_ratio) * 10))
 
-                    if sent_delta > 1000:
-                        ratio = recv_delta / max(sent_delta, 1)
-                        loss = max(0.0, min(15.0, (1.0 - ratio) * 12))
-
-                    if key in self._history and len(self._history[key]) >= 2:
-                        recent_lat = [m.latency_ms for m in self._history[key][-5:]]
-                        if len(recent_lat) >= 2:
-                            jitter = stdev(recent_lat)
-
-                self._last_bytes[key] = {
-                    "sent": curr_bytes_sent,
-                    "recv": curr_bytes_recv,
-                    "ts": now,
-                }
+                    # Jitter from latency variance across recent snapshots
+                    recent_latencies = [s["latency_ns"] / 1_000_000 for s in snapshots[-4:]]
+                    if len(recent_latencies) >= 2:
+                        jitter = stdev(recent_latencies)
 
                 self.record_metrics(
                     peer_id=key,
-                    latency_ms=min(latency_ms, 600),
+                    latency_ms=min(latency_ms, 650),
                     packet_loss_percent=round(loss, 2),
                     jitter_ms=round(jitter, 1),
                 )
@@ -199,41 +203,7 @@ class HyperspaceLinkQualityOracle:
                 self.console.print(f"[yellow]Warning:[/yellow] Could not poll Yggdrasil: {e}")
             return 0
 
-    def show_history(self, peer_id: str, limit: int = 10):
-        if not self.storage:
-            print("Persistence is disabled.")
-            return
-
-        metrics = self.storage.get_recent_metrics(peer_id, limit)
-        score = self.get_score(peer_id)
-
-        if RICH_AVAILABLE and self.console:
-            self.console.print(Panel.fit(f"[bold]History for {peer_id}[/bold]", border_style="cyan"))
-            if metrics:
-                table = Table(show_header=True, header_style="bold")
-                table.add_column("Time")
-                table.add_column("Latency (ms)", justify="right")
-                table.add_column("Loss %", justify="right")
-                table.add_column("Jitter (ms)", justify="right")
-
-                for m in reversed(metrics):
-                    ts = time.strftime("%H:%M:%S", time.localtime(m[3]))
-                    table.add_row(ts, f"{m[0]:.1f}", f"{m[1]:.2f}", f"{m[2]:.1f}")
-                self.console.print(table)
-            else:
-                self.console.print("[dim]No historical data found for this peer.[/dim]")
-
-            if score:
-                self.console.print(f"\nLatest score: [bold]{score.overall_health:.1f}%[/bold] health | {score.classification}")
-        else:
-            print(f"\nHistory for {peer_id}:")
-            for m in reversed(metrics):
-                print(f"  {time.strftime('%H:%M:%S', time.localtime(m[3]))} | Latency: {m[0]:.1f}ms | Loss: {m[1]:.2f}% | Jitter: {m[2]:.1f}ms")
-            if score:
-                print(f"Latest: {score.overall_health:.1f}% health | {score.classification}")
-
     def show_status(self):
-        """Print a high-level status overview of the Oracle."""
         all_scores = self.get_all_scores()
         total = len(all_scores)
 
@@ -256,7 +226,6 @@ class HyperspaceLinkQualityOracle:
                 border_style="bright_blue",
             ))
 
-            # Simple top 5 by health
             sorted_peers = sorted(all_scores.items(), key=lambda x: x[1].overall_health, reverse=True)[:5]
             table = Table(title="Top Peers by Health", show_header=True, header_style="bold green")
             table.add_column("Peer")
