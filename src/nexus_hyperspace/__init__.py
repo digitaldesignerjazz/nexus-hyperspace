@@ -12,6 +12,7 @@ try:
     from .oracle import HyperspaceLinkQualityOracle
     from .models import LinkMetrics, LinkScore, PeerClassification
     from .yggdrasil_client import YggdrasilAdminClient
+    from .storage import OracleStorage
 except ImportError:
     pass
 
@@ -21,5 +22,6 @@ __all__ = [
     "LinkScore",
     "PeerClassification",
     "YggdrasilAdminClient",
+    "OracleStorage",
     "__version__",
 ]
