@@ -24,20 +24,17 @@ except ImportError:
 
 try:
     from .models import LinkMetrics, LinkScore
+    from .yggdrasil_client import YggdrasilAdminClient
 except ImportError:
-    # Fallback for direct script execution during early dev
     from models import LinkMetrics, LinkScore  # type: ignore
+    from yggdrasil_client import YggdrasilAdminClient  # type: ignore
 
 
 class HyperspaceLinkQualityOracle:
     """Core component for recording metrics and computing link health scores.
 
-    Uses simple EWMA-style scoring + rule-based classification for the prototype.
-    Future versions will add:
-    - Persistent storage (SQLite)
-    - Real Yggdrasil admin socket polling
-    - Time-series forecasting
-    - Integration with Nexus agent swarm via gRPC/HTTP
+    Supports both simulated data (for development) and live data from a running
+    Yggdrasil node via the admin socket (when available).
     """
 
     def __init__(self, ewma_alpha: float = 0.3):
@@ -45,6 +42,7 @@ class HyperspaceLinkQualityOracle:
         self._history: dict[str, list[LinkMetrics]] = defaultdict(list)
         self._scores: dict[str, LinkScore] = {}
         self.console = Console() if RICH_AVAILABLE else None
+        self.ygg = YggdrasilAdminClient()
 
     def record_metrics(
         self,
@@ -53,7 +51,6 @@ class HyperspaceLinkQualityOracle:
         packet_loss_percent: float,
         jitter_ms: float = 0.0,
     ) -> LinkScore:
-        """Record a new observation and recompute the score for the peer."""
         metrics = LinkMetrics(
             peer_id=peer_id,
             latency_ms=latency_ms,
@@ -116,33 +113,96 @@ class HyperspaceLinkQualityOracle:
         )
 
     def get_score(self, peer_id: str) -> LinkScore | None:
-        """Return the latest computed score for a peer (or None)."""
         return self._scores.get(peer_id)
 
     def get_all_scores(self) -> dict[str, LinkScore]:
         return self._scores.copy()
 
-    def demo_run(self, num_peers: int = 5) -> None:
-        """Run a self-contained demonstration with simulated hyperspace + local peers.
+    def poll_from_yggdrasil(self) -> int:
+        """Pull current peers from a running Yggdrasil node and record metrics.
 
-        Uses Rich for beautiful output when available (pip install -e ".[dev]").
+        Returns the number of peers successfully recorded.
+        This is the bridge from simulation to real-world operation (M1.1/M1.4).
+        """
+        if not self.ygg.is_available():
+            return 0
+
+        try:
+            peers = self.ygg.get_peers()
+            recorded = 0
+            for peer in peers:
+                # Yggdrasil peer dict usually contains 'latency', 'bytesSent', 'bytesReceived', etc.
+                # For prototype we derive simple loss estimate from activity
+                latency = float(peer.get("latency", 0)) / 1_000_000  # ns → ms
+                # Very rough loss proxy (in real version we would track over time)
+                loss = 0.1 if peer.get("bytesReceived", 0) == 0 else 0.5
+
+                if latency > 0:
+                    self.record_metrics(
+                        peer_id=peer.get("key", "unknown-peer"),
+                        latency_ms=min(latency, 500),
+                        packet_loss_percent=loss,
+                    )
+                    recorded += 1
+            return recorded
+        except Exception as e:
+            if self.console:
+                self.console.print(f"[yellow]Warning:[/yellow] Could not poll Yggdrasil: {e}")
+            return 0
+
+    def demo_run(self, num_peers: int = 5, prefer_live: bool = True) -> None:
+        """Run demonstration.
+
+        If a Yggdrasil admin socket is available and prefer_live=True,
+        it will use real peer data. Otherwise falls back to simulation.
         """
         title = "Nexus Hyperspace — Link Quality Oracle Demo (Prototype v0.1)"
+
+        live_count = 0
+        if prefer_live:
+            live_count = self.poll_from_yggdrasil()
+
+        mode = "LIVE (from Yggdrasil)" if live_count > 0 else "SIMULATED"
 
         if RICH_AVAILABLE and self.console:
             self.console.print(Panel.fit(
                 f"[bold cyan]{title}[/bold cyan]\n"
-                "[dim]Core concepts from ARCHITECTURE.md • M1.1 foundation[/dim]",
+                f"[dim]Mode: {mode} • M1.1 foundation[/dim]",
                 border_style="bright_blue",
                 box=box.ROUNDED,
             ))
-            self.console.print("[dim]Simulating observations on several peers (local + hyperspace)...[/dim]\n")
+            if live_count > 0:
+                self.console.print(f"[green]✓[/green] Using live data from {live_count} real peers\n")
+            else:
+                self.console.print("[dim]Simulating observations on several peers (local + hyperspace)...[/dim]\n")
         else:
             print(f"\n{title}")
+            print(f"Mode: {mode}")
             print("=" * 70)
-            print("Simulating observations on several peers (local + hyperspace)...\n")
 
-        demo_peers = [
+        if live_count == 0:
+            # Fallback simulation (same peers as before)
+            demo_peers = [
+                "local-cluster-hannover-01",
+                "hyperspace-eu-berlin-03",
+                "hyperspace-us-west-seattle",
+                "hyperspace-asia-tokyo-02",
+                "hyperspace-latam-sao-paulo",
+            ][:num_peers]
+
+            random.seed(42)
+            for peer in demo_peers:
+                for _ in range(random.randint(4, 7)):
+                    if "local" in peer:
+                        lat = random.uniform(4, 22)
+                        loss = random.uniform(0, 0.4)
+                    else:
+                        lat = random.uniform(45, 165)
+                        loss = random.uniform(0.1, 4.5)
+                    self.record_metrics(peer, latency_ms=lat, packet_loss_percent=loss)
+
+        # Render results
+        peers_to_show = list(self._scores.keys()) if live_count > 0 else [
             "local-cluster-hannover-01",
             "hyperspace-eu-berlin-03",
             "hyperspace-us-west-seattle",
@@ -150,37 +210,8 @@ class HyperspaceLinkQualityOracle:
             "hyperspace-latam-sao-paulo",
         ][:num_peers]
 
-        random.seed(42)
-
-        for peer in demo_peers:
-            for _ in range(random.randint(4, 7)):
-                if "local" in peer:
-                    lat = random.uniform(4, 22)
-                    loss = random.uniform(0, 0.4)
-                else:
-                    lat = random.uniform(45, 165)
-                    loss = random.uniform(0.1, 4.5)
-                self.record_metrics(peer, latency_ms=lat, packet_loss_percent=loss)
-
-            score = self.get_score(peer)
-            if score:
-                if RICH_AVAILABLE and self.console:
-                    # Will be rendered in table below
-                    pass
-                else:
-                    print(
-                        f"{peer:30} | Health: {score.overall_health:5.1f}% | "
-                        f"Latency: {score.latency_score:5.1f} | Stability: {score.stability_score:5.1f} | "
-                        f"Conf: {score.confidence:.2f} | {score.classification}"
-                    )
-
         if RICH_AVAILABLE and self.console:
-            table = Table(
-                title="[bold]Link Quality Scores[/bold]",
-                show_header=True,
-                header_style="bold magenta",
-                box=box.ROUNDED,
-            )
+            table = Table(title="[bold]Link Quality Scores[/bold]", show_header=True, header_style="bold magenta", box=box.ROUNDED)
             table.add_column("Peer", style="cyan", no_wrap=True)
             table.add_column("Health %", justify="right", style="green")
             table.add_column("Latency", justify="right")
@@ -188,7 +219,7 @@ class HyperspaceLinkQualityOracle:
             table.add_column("Confidence", justify="right")
             table.add_column("Classification", style="yellow")
 
-            for peer in demo_peers:
+            for peer in peers_to_show:
                 score = self.get_score(peer)
                 if score:
                     health_style = "green" if score.overall_health > 75 else "yellow" if score.overall_health > 55 else "red"
@@ -200,16 +231,18 @@ class HyperspaceLinkQualityOracle:
                         f"{score.confidence:.2f}",
                         score.classification,
                     )
-
             self.console.print(table)
             self.console.print(
                 "[green]✓[/green] Oracle prototype operational. "
                 "Scores ready for router / agent consumption.\n"
-                "[dim]Next: Real Yggdrasil admin socket + persistent storage (SQLite).[/dim]"
+                "[dim]Next: Persistent storage (SQLite) + full M1.2 classification engine.[/dim]"
             )
         else:
-            print("\n✓ Oracle prototype operational. Scores ready for router / agent consumption.")
-            print("Next: Integrate real Yggdrasil admin socket + persistent storage.\n")
+            for peer in peers_to_show:
+                score = self.get_score(peer)
+                if score:
+                    print(f"{peer:30} | Health: {score.overall_health:5.1f}% | Latency: {score.latency_score:5.1f} | Stability: {score.stability_score:5.1f} | {score.classification}")
+            print("\n✓ Oracle prototype operational.")
 
 
 if __name__ == "__main__":
